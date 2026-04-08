@@ -33,6 +33,7 @@
  *********************************************************************/
 
 #include "core.h"
+#include "utils.h"
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
 #include <moveit/python/task_constructor/properties.h>
@@ -52,23 +53,6 @@ namespace python {
 
 namespace {
 
-// utility function to normalize index: negative indeces reference from the end
-size_t normalize_index(size_t size, long index) {
-	if (index < 0)
-		index += size;
-	if (index >= long(size) || index < 0)
-		throw pybind11::index_error("Index out of range");
-	return index;
-}
-
-// implement operator[](index)
-template <typename T>
-typename T::value_type get_item(const T& container, long index) {
-	auto it = container.begin();
-	std::advance(it, normalize_index(container.size(), index));
-	return *it;
-}
-
 py::list getForwardedProperties(const Stage& self) {
 	py::list l;
 	for (const std::string& value : self.forwardedProperties())
@@ -86,9 +70,8 @@ void setForwardedProperties(Stage& self, const py::object& names) {
 			for (auto item : names)
 				s.emplace(item.cast<std::string>());
 	} catch (const py::cast_error& e) {
-		// manually translate cast_error to type error
-		PyErr_SetString(PyExc_TypeError, e.what());
-		throw py::error_already_set();
+		// translate cast_error to type_error with an informative message
+		throw py::type_error("Expecting a string or a list of strings");
 	}
 	self.setForwardedProperties(s);
 }
@@ -97,7 +80,9 @@ void setForwardedProperties(Stage& self, const py::object& names) {
 
 void export_core(pybind11::module& m) {
 	/// translate InitStageException into InitStageError
-	static py::exception<InitStageException> init_stage_error(m, "InitStageError");
+	PYBIND11_CONSTINIT static py::gil_safe_call_once_and_store<py::object> exc_storage;
+	exc_storage.call_once_and_store_result([&]() { return py::exception<InitStageException>(m, "InitStageError"); });
+
 	/// provide extended error description for InitStageException
 	py::register_exception_translator([](std::exception_ptr p) {  // NOLINT(performance-unnecessary-value-param)
 		try {
@@ -106,9 +91,11 @@ void export_core(pybind11::module& m) {
 		} catch (const InitStageException& e) {
 			std::stringstream message;
 			message << e;
-			init_stage_error(message.str().c_str());
+			py::set_error(exc_storage.get_stored(), message.str().c_str());
 		}
 	});
+
+	py::classh<Introspection>(m, "Introspection", "Introspection class");
 
 	py::classh<SolutionBase>(m, "Solution", "Abstract base class for solutions of a stage")
 	    .def_property("cost", &SolutionBase::cost, &SolutionBase::setCost, "float: Cost associated with the solution")
@@ -124,12 +111,12 @@ void export_core(pybind11::module& m) {
 	        ":visualization_msgs:`Marker`: Markers to visualize important aspects of the trajectory (read-only)")
 	    .def(
 	        "toMsg",
-	        [](const SolutionBasePtr& s) {
-		        moveit_task_constructor_msgs::Solution msg;
-		        s->fillMessage(msg);
+	        [](const SolutionBase& self, moveit::task_constructor::Introspection* introspection) {
+		        moveit_task_constructor_msgs::msg::Solution msg;
+		        self.toMsg(msg, introspection);
 		        return msg;
 	        },
-	        "Convert to the ROS message ``Solution``");
+	        "Convert to the ROS message ``Solution``", py::arg("introspection") = nullptr);
 
 	py::classh<SubTrajectory, SolutionBase>(m, "SubTrajectory",
 	                                        "Solution trajectory connecting two InterfaceStates of a stage")
@@ -175,7 +162,7 @@ void export_core(pybind11::module& m) {
 	    .def(py::init<std::map<std::string, double>>());
 	py::classh<cost::DistanceToReference, TrajectoryCostTerm>(m, "DistanceToReference",
 	                                                          "Computes joint-based distance to reference pose")
-	    .def(py::init<const moveit_msgs::RobotState&, TrajectoryCostTerm::Mode, std::map<std::string, double>>(),
+	    .def(py::init<const moveit_msgs::msg::RobotState&, TrajectoryCostTerm::Mode, std::map<std::string, double>>(),
 	         "reference"_a, "mode"_a = TrajectoryCostTerm::Mode::AUTO, "weights"_a = std::map<std::string, double>())
 	    .def(py::init<const std::map<std::string, double>&, TrajectoryCostTerm::Mode, std::map<std::string, double>>(),
 	         "reference"_a, "mode"_a = TrajectoryCostTerm::Mode::AUTO, "weights"_a = std::map<std::string, double>());
@@ -427,8 +414,9 @@ void export_core(pybind11::module& m) {
 	    .def_property_readonly("failures", &Task::failures, "Solutions: Failed Solutions of the stage (read-only)")
 	    .def_property("name", &Task::name, &Task::setName, "str: name of the task displayed e.g. in rviz")
 
-	    .def("loadRobotModel", &Task::loadRobotModel, "robot_description"_a = "robot_description",
+	    .def("loadRobotModel", &Task::loadRobotModel, "node"_a, "robot_description"_a = "robot_description",
 	         "Load robot model from given ROS parameter")
+	    .def("setRobotModel", &Task::setRobotModel, "robot_model"_a, "Set the robot model for the task")
 	    .def("getRobotModel", &Task::getRobotModel)
 	    .def("enableIntrospection", &Task::enableIntrospection, "enabled"_a = true,
 	         "Enable publishing intermediate results for inspection in ``rviz``")
@@ -440,6 +428,7 @@ void export_core(pybind11::module& m) {
 			        t.add(it->cast<Stage::pointer>());
 	        },
 	        "Append stage(s) to the task's top-level container")
+	    .def("insert", &Task::insert, "stage"_a, "before"_a = -1, "Insert stage before given index")
 	    .def("__len__", [](const Task& t) { t.stages()->numChildren(); })
 	    .def(
 	        "__getitem__",
@@ -475,6 +464,8 @@ void export_core(pybind11::module& m) {
 	    .def(
 	        "setCostTerm", [](Task& self, const LambdaCostTerm::SubTrajectoryShortSignature& f) { self.setCostTerm(f); },
 	        "Specify a function to calculate trajectory costs")
+	    .def("introspection", &Task::introspection, py::return_value_policy::reference_internal,
+	         "Access introspection object")
 	    .def("reset", &Task::reset, "Reset task (and all its stages)")
 	    .def("init", py::overload_cast<>(&Task::init), "Initialize the task (and all its stages)")
 	    .def("plan", &Task::plan, "max_solutions"_a = 0, R"(
@@ -485,30 +476,7 @@ void export_core(pybind11::module& m) {
 	        "publish",
 	        [](Task& self, const SolutionBasePtr& solution) { self.introspection().publishSolution(*solution); },
 	        "solution"_a, "Publish the given solution to the ROS topic ``solution``")
-	    .def_static(
-	        "execute",
-	        [](const SolutionBasePtr& solution) {
-		        using namespace moveit::planning_interface;
-		        PlanningSceneInterface psi;
-		        MoveGroupInterface mgi(solution->start()->scene()->getRobotModel()->getJointModelGroupNames()[0]);
-
-		        MoveGroupInterface::Plan plan;
-		        moveit_task_constructor_msgs::Solution serialized;
-		        solution->fillMessage(serialized);
-
-		        for (const moveit_task_constructor_msgs::SubTrajectory& traj : serialized.sub_trajectory) {
-			        if (!traj.trajectory.joint_trajectory.points.empty()) {
-				        plan.trajectory_ = traj.trajectory;
-				        if (!mgi.execute(plan)) {
-					        ROS_ERROR("Execution failed! Aborting!");
-					        return;
-				        }
-			        }
-			        psi.applyPlanningScene(traj.scene_diff);
-		        }
-		        ROS_INFO("Executed successfully");
-	        },
-	        "solution"_a, "Send given solution to ``move_group`` node for execution");
+	    .def("execute", &Task::execute, "solution"_a, "Send given solution to ``move_group`` node for execution");
 }
 }  // namespace python
 }  // namespace moveit

@@ -43,9 +43,7 @@
 #include <moveit/move_group/capability_names.h>
 #include <moveit/robot_state/conversions.h>
 #include <moveit/utils/message_checks.h>
-#include <moveit/moveit_cpp/moveit_cpp.h>
-
-#include <boost/algorithm/string/join.hpp>
+#include <fmt/format.h>
 
 namespace {
 
@@ -95,11 +93,14 @@ void ExecuteTaskSolutionCapability::initialize() {
 	    ActionServerType::CancelCallback(
 	        std::bind(&ExecuteTaskSolutionCapability::preemptCallback, this, std::placeholders::_1)),
 	    ActionServerType::AcceptedCallback(
-	        std::bind(&ExecuteTaskSolutionCapability::goalCallback, this, std::placeholders::_1)));
+	        [this](const std::shared_ptr<rclcpp_action::ServerGoalHandle<ExecuteTaskSolutionAction>>& goal_handle) {
+		        last_goal_future_ =
+		            std::async(std::launch::async, &ExecuteTaskSolutionCapability::execCallback, this, goal_handle);
+	        }));
 }
 
-void ExecuteTaskSolutionCapability::goalCallback(
-    const std::shared_ptr<rclcpp_action::ServerGoalHandle<ExecuteTaskSolutionAction>> goal_handle) {
+void ExecuteTaskSolutionCapability::execCallback(
+    const std::shared_ptr<rclcpp_action::ServerGoalHandle<ExecuteTaskSolutionAction>>& goal_handle) {
 	auto result = std::make_shared<moveit_task_constructor_msgs::action::ExecuteTaskSolution::Result>();
 
 	const auto& goal = goal_handle->get_goal();
@@ -110,7 +111,7 @@ void ExecuteTaskSolutionCapability::goalCallback(
 	}
 
 	plan_execution::ExecutableMotionPlan plan;
-	if (!constructMotionPlan(goal->solution, plan))
+	if (!constructMotionPlan(goal->solution, plan, goal_handle))
 		result->error_code.val = moveit_msgs::msg::MoveItErrorCodes::INVALID_MOTION_PLAN;
 	else {
 		RCLCPP_INFO(LOGGER, "Executing TaskSolution");
@@ -126,14 +127,15 @@ void ExecuteTaskSolutionCapability::goalCallback(
 }
 
 rclcpp_action::CancelResponse ExecuteTaskSolutionCapability::preemptCallback(
-    const std::shared_ptr<rclcpp_action::ServerGoalHandle<ExecuteTaskSolutionAction>> /*goal_handle*/) {
+    const std::shared_ptr<rclcpp_action::ServerGoalHandle<ExecuteTaskSolutionAction>>& /*goal_handle*/) {
 	if (context_->plan_execution_)
 		context_->plan_execution_->stop();
 	return rclcpp_action::CancelResponse::ACCEPT;
 }
 
-bool ExecuteTaskSolutionCapability::constructMotionPlan(const moveit_task_constructor_msgs::msg::Solution& solution,
-                                                        plan_execution::ExecutableMotionPlan& plan) {
+bool ExecuteTaskSolutionCapability::constructMotionPlan(
+    const moveit_task_constructor_msgs::msg::Solution& solution, plan_execution::ExecutableMotionPlan& plan,
+    const std::shared_ptr<rclcpp_action::ServerGoalHandle<ExecuteTaskSolutionAction>>& goal_handle) {
 	moveit::core::RobotModelConstPtr model = context_->planning_scene_monitor_->getRobotModel();
 
 	moveit::core::RobotState state(model);
@@ -161,8 +163,8 @@ bool ExecuteTaskSolutionCapability::constructMotionPlan(const moveit_task_constr
 			if (!joint_names.empty()) {
 				group = findJointModelGroup(*model, joint_names);
 				if (!group) {
-					RCLCPP_ERROR_STREAM(LOGGER, "Could not find JointModelGroup that actuates {"
-					                                << boost::algorithm::join(joint_names, ", ") << "}");
+					RCLCPP_ERROR_STREAM(LOGGER, fmt::format("Could not find JointModelGroup that actuates {{{}}}",
+					                                        fmt::join(joint_names, ", ")));
 					return false;
 				}
 				RCLCPP_DEBUG(LOGGER, "Using JointModelGroup '%s' for execution", group->getName().c_str());
@@ -171,15 +173,36 @@ bool ExecuteTaskSolutionCapability::constructMotionPlan(const moveit_task_constr
 		exec_traj.trajectory_ = std::make_shared<robot_trajectory::RobotTrajectory>(model, group);
 		exec_traj.trajectory_->setRobotTrajectoryMsg(state, sub_traj.trajectory);
 
+		// Check that sub trajectories that contain a valid trajectory have controllers configured.
+		if (!sub_traj.trajectory.joint_trajectory.points.empty() && sub_traj.execution_info.controller_names.empty()) {
+			RCLCPP_WARN(LOGGER,
+			            "The trajectory of stage '%i' from task '%s' does not have any controllers specified for "
+			            "trajectory execution. This might lead to unexpected controller selection.",
+			            sub_traj.info.stage_id, solution.task_id.c_str());
+		}
+		exec_traj.controller_names_ = sub_traj.execution_info.controller_names;
+
 		/* TODO add action feedback and markers */
-		exec_traj.effect_on_success_ = [this, sub_traj,
-		                                description](const plan_execution::ExecutableMotionPlan* /*plan*/) {
-			if (!moveit::core::isEmpty(sub_traj.scene_diff)) {
-				RCLCPP_DEBUG_STREAM(LOGGER, "apply effect of " << description);
-				return context_->planning_scene_monitor_->newPlanningSceneMessage(sub_traj.scene_diff);
-			}
-			return true;
-		};
+		exec_traj.effect_on_success_ =
+		    [this, &scene_diff = const_cast<::moveit_msgs::msg::PlanningScene&>(sub_traj.scene_diff), description,
+		     goal_handle, i, no = solution.sub_trajectory.size()](const plan_execution::ExecutableMotionPlan* /*plan*/) {
+			    // publish feedback
+			    auto feedback = std::make_shared<moveit_task_constructor_msgs::action::ExecuteTaskSolution::Feedback>();
+			    feedback->sub_id = i;
+			    feedback->sub_no = no;
+			    goal_handle->publish_feedback(feedback);
+
+			    // Never modify joint state directly (only via robot trajectories)
+			    scene_diff.robot_state.joint_state = sensor_msgs::msg::JointState();
+			    scene_diff.robot_state.multi_dof_joint_state = sensor_msgs::msg::MultiDOFJointState();
+			    scene_diff.robot_state.is_diff = true;  // silent empty JointState msg error
+
+			    if (!moveit::core::isEmpty(scene_diff)) {
+				    RCLCPP_DEBUG_STREAM(LOGGER, "apply effect of " << description);
+				    return context_->planning_scene_monitor_->newPlanningSceneMessage(scene_diff);
+			    }
+			    return true;
+		    };
 
 		if (!moveit::core::isEmpty(sub_traj.scene_diff.robot_state) &&
 		    !moveit::core::robotStateMsgToRobotState(sub_traj.scene_diff.robot_state, state, true)) {
@@ -193,5 +216,5 @@ bool ExecuteTaskSolutionCapability::constructMotionPlan(const moveit_task_constr
 
 }  // namespace move_group
 
-#include <class_loader/class_loader.hpp>
-CLASS_LOADER_REGISTER_CLASS(move_group::ExecuteTaskSolutionCapability, move_group::MoveGroupCapability)
+#include <pluginlib/class_list_macros.hpp>
+PLUGINLIB_EXPORT_CLASS(move_group::ExecuteTaskSolutionCapability, move_group::MoveGroupCapability)

@@ -1,8 +1,9 @@
 #pragma once
 
-#include <visualization_msgs/msg/marker.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <Eigen/Geometry>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <std_msgs/msg/color_rgba.hpp>
+#include <visualization_msgs/msg/marker.hpp>
 
 namespace urdf {
 class Geometry;
@@ -10,7 +11,7 @@ class Geometry;
 
 namespace rviz_marker_tools {
 
-enum Color
+enum Color : uint8_t
 {
 	BLACK = 0,
 	BROWN = 1,

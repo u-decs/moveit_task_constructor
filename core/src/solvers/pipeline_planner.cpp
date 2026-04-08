@@ -156,7 +156,7 @@ void initMotionPlanRequest(moveit_msgs::msg::MotionPlanRequest& req, const Prope
                            const moveit::core::JointModelGroup* jmg, double timeout) {
 	req.group_name = jmg->getName();
 	req.planner_id = p.get<std::string>("planner");
-	req.allowed_planning_time = timeout;
+	req.allowed_planning_time = std::min(timeout, p.get<double>("timeout"));
 	req.start_state.is_diff = true;  // we don't specify an extra start state
 
 	req.num_planning_attempts = p.get<uint>("num_planning_attempts");
@@ -165,10 +165,11 @@ void initMotionPlanRequest(moveit_msgs::msg::MotionPlanRequest& req, const Prope
 	req.workspace_parameters = p.get<moveit_msgs::msg::WorkspaceParameters>("workspace_parameters");
 }
 
-bool PipelinePlanner::plan(const planning_scene::PlanningSceneConstPtr& from,
-                           const planning_scene::PlanningSceneConstPtr& to, const moveit::core::JointModelGroup* jmg,
-                           double timeout, robot_trajectory::RobotTrajectoryPtr& result,
-                           const moveit_msgs::msg::Constraints& path_constraints) {
+PlannerInterface::Result PipelinePlanner::plan(const planning_scene::PlanningSceneConstPtr& from,
+                                               const planning_scene::PlanningSceneConstPtr& to,
+                                               const moveit::core::JointModelGroup* jmg, double timeout,
+                                               robot_trajectory::RobotTrajectoryPtr& result,
+                                               const moveit_msgs::msg::Constraints& path_constraints) {
 	const auto& props = properties();
 	moveit_msgs::msg::MotionPlanRequest req;
 	initMotionPlanRequest(req, props, jmg, timeout);
@@ -178,17 +179,15 @@ bool PipelinePlanner::plan(const planning_scene::PlanningSceneConstPtr& from,
 	                                                                          props.get<double>("goal_joint_tolerance"));
 	req.path_constraints = path_constraints;
 
-	::planning_interface::MotionPlanResponse res;
-	bool success = planner_->generatePlan(from, req, res);
-	result = res.trajectory_;
-	return success;
+	return plan(from, req, result);
 }
 
-bool PipelinePlanner::plan(const planning_scene::PlanningSceneConstPtr& from, const moveit::core::LinkModel& link,
-                           const Eigen::Isometry3d& offset, const Eigen::Isometry3d& target_eigen,
-                           const moveit::core::JointModelGroup* jmg, double timeout,
-                           robot_trajectory::RobotTrajectoryPtr& result,
-                           const moveit_msgs::msg::Constraints& path_constraints) {
+PlannerInterface::Result PipelinePlanner::plan(const planning_scene::PlanningSceneConstPtr& from,
+                                               const moveit::core::LinkModel& link, const Eigen::Isometry3d& offset,
+                                               const Eigen::Isometry3d& target_eigen,
+                                               const moveit::core::JointModelGroup* jmg, double timeout,
+                                               robot_trajectory::RobotTrajectoryPtr& result,
+                                               const moveit_msgs::msg::Constraints& path_constraints) {
 	const auto& props = properties();
 	moveit_msgs::msg::MotionPlanRequest req;
 	initMotionPlanRequest(req, props, jmg, timeout);
@@ -203,10 +202,16 @@ bool PipelinePlanner::plan(const planning_scene::PlanningSceneConstPtr& from, co
 	    props.get<double>("goal_orientation_tolerance"));
 	req.path_constraints = path_constraints;
 
+	return plan(from, req, result);
+}
+
+PlannerInterface::Result PipelinePlanner::plan(const planning_scene::PlanningSceneConstPtr& from,
+                                               const moveit_msgs::msg::MotionPlanRequest& req,
+                                               robot_trajectory::RobotTrajectoryPtr& result) {
 	::planning_interface::MotionPlanResponse res;
 	bool success = planner_->generatePlan(from, req, res);
 	result = res.trajectory_;
-	return success;
+	return { success, success ? std::string() : moveit::core::error_code_to_string(res.error_code_.val) };
 }
 }  // namespace solvers
 }  // namespace task_constructor

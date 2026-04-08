@@ -1,7 +1,8 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.16)
 project(moveit_task_constructor_visualization)
 
 find_package(ament_cmake REQUIRED)
+find_package(fmt REQUIRED)
 find_package(Boost REQUIRED)
 find_package(moveit_common REQUIRED)
 moveit_package()

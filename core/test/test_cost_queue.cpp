@@ -5,10 +5,6 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock-matchers.h>
 
-#ifndef TYPED_TEST_SUITE
-#define TYPED_TEST_SUITE(SUITE, TYPES) TYPED_TEST_CASE(SUITE, TYPES)
-#endif
-
 namespace mtc = moveit::task_constructor;
 
 // type-trait functions for OrderedTest<T>
@@ -130,7 +126,7 @@ TYPED_TEST(OrderedTest, sorting) {
 template <typename ValueType, typename CostType>
 std::ostream& operator<<(std::ostream& os, const cost_ordered<ValueType, CostType>& queue) {
 	for (const auto& pair : queue.sorted())
-		os << pair.cost() << ": " << pair.value() << std::endl;
+		os << pair.cost() << ": " << pair.value() << '\n';
 	return os;
 }
 

@@ -38,16 +38,17 @@
 #include <moveit/task_constructor/container_p.h>
 #include <moveit/task_constructor/task_p.h>
 #include <moveit/task_constructor/introspection.h>
-#include <moveit_task_constructor_msgs/action/execute_task_solution.hpp>
 
 #include <rclcpp/rclcpp.hpp>
-#include <rclcpp_action/rclcpp_action.hpp>
 
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/planning_pipeline/planning_pipeline.h>
 
+#include <scope_guard/scope_guard.hpp>
+
 #include <functional>
 
+using namespace std::chrono_literals;
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_task_constructor.task");
 
 namespace {
@@ -94,6 +95,7 @@ const ContainerBase* TaskPrivate::stages() const {
 
 Task::Task(const std::string& ns, bool introspection, ContainerBase::pointer&& container)
   : WrapperBase(new TaskPrivate(this, ns), std::move(container)) {
+	setPruning(false);
 	setTimeout(std::numeric_limits<double>::max());
 
 	// monitor state on commandline
@@ -212,11 +214,12 @@ void Task::init() {
 	// task expects its wrapped child to push to both ends, this triggers interface resolution
 	stages()->pimpl()->resolveInterface(InterfaceFlags({ GENERATE }));
 
-	// provide introspection instance to all stages
+	// provide introspection instance and preempt_requested to all stages
 	auto* introspection = impl->introspection_.get();
 	impl->traverseStages(
-	    [introspection](Stage& stage, int /*depth*/) {
+	    [introspection, impl](Stage& stage, int /*depth*/) {
 		    stage.pimpl()->setIntrospection(introspection);
+		    stage.pimpl()->setPreemptRequestedMember(&impl->preempt_requested_);
 		    return true;
 	    },
 	    1, UINT_MAX);
@@ -231,19 +234,28 @@ bool Task::canCompute() const {
 }
 
 void Task::compute() {
-	stages()->pimpl()->runCompute();
+	try {
+		stages()->pimpl()->runCompute();
+	} catch (const PreemptStageException& e) {
+		// do nothing, needed for early stop
+	}
 }
 
 moveit::core::MoveItErrorCode Task::plan(size_t max_solutions) {
+	// ensure the preempt request is resetted once this method exits
+	auto guard = sg::make_scope_guard([this]() noexcept { this->resetPreemptRequest(); });
+
 	auto impl = pimpl();
 	init();
 
 	// Print state and return success if there are solutions otherwise the input error_code
-	const auto success_or = [this](const int32_t error_code) {
+	const auto success_or = [this](const int32_t error_code) -> int32_t {
+		if (numSolutions() > 0)
+			return moveit::core::MoveItErrorCode::SUCCESS;
 		printState();
-		return numSolutions() > 0 ? moveit::core::MoveItErrorCode::SUCCESS : error_code;
+		explainFailure();
+		return error_code;
 	};
-	impl->preempt_requested_ = false;
 	const double available_time = timeout();
 	const auto start_time = std::chrono::steady_clock::now();
 	while (canCompute() && (max_solutions == 0 || numSolutions() < max_solutions)) {
@@ -264,44 +276,62 @@ void Task::preempt() {
 	pimpl()->preempt_requested_ = true;
 }
 
+void Task::resetPreemptRequest() {
+	pimpl()->preempt_requested_ = false;
+}
+
 moveit::core::MoveItErrorCode Task::execute(const SolutionBase& s) {
-	// Add random ID to prevent warnings about multiple publishers within the same node
-	rclcpp::NodeOptions options;
-	options.arguments(
-	    { "--ros-args", "-r",
-	      "__node:=moveit_task_constructor_executor_" + std::to_string(reinterpret_cast<std::size_t>(this)) });
-	auto node = rclcpp::Node::make_shared("_", options);
-	auto ac = rclcpp_action::create_client<moveit_task_constructor_msgs::action::ExecuteTaskSolution>(
-	    node, "execute_task_solution");
-	ac->wait_for_action_server();
+	// If this is the first call to execute create a persistent node that can be used to call the action server
+	if (!execute_solution_node_) {
+		execute_solution_node_ = rclcpp::Node::make_shared("moveit_task_constructor_executor_" +
+		                                                   std::to_string(reinterpret_cast<std::size_t>(this)));
+		execute_ac_ = rclcpp_action::create_client<moveit_task_constructor_msgs::action::ExecuteTaskSolution>(
+		    execute_solution_node_, "execute_task_solution");
+	}
+	if (!execute_ac_->wait_for_action_server(0.5s)) {
+		RCLCPP_ERROR(execute_solution_node_->get_logger(),
+		             "Failed to connect to the 'execute_task_solution' action server");
+		return moveit::core::MoveItErrorCode::FAILURE;
+	}
 
 	moveit_task_constructor_msgs::action::ExecuteTaskSolution::Goal goal;
-	s.fillMessage(goal.solution, pimpl()->introspection_.get());
-	s.start()->scene()->getPlanningSceneMsg(goal.solution.start_scene);
+	s.toMsg(goal.solution, pimpl()->introspection_.get());
 
 	moveit_msgs::msg::MoveItErrorCodes error_code;
 	error_code.val = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
-	auto goal_handle_future = ac->async_send_goal(goal);
-	if (rclcpp::spin_until_future_complete(node, goal_handle_future) != rclcpp::FutureReturnCode::SUCCESS) {
-		RCLCPP_ERROR(node->get_logger(), "Send goal call failed");
+	auto goal_handle_future = execute_ac_->async_send_goal(goal);
+	if (rclcpp::spin_until_future_complete(execute_solution_node_, goal_handle_future) !=
+	    rclcpp::FutureReturnCode::SUCCESS) {
+		RCLCPP_ERROR(execute_solution_node_->get_logger(), "Send goal call failed");
 		return error_code;
 	}
 
 	const auto& goal_handle = goal_handle_future.get();
 	if (!goal_handle) {
-		RCLCPP_ERROR(node->get_logger(), "Goal was rejected by server");
+		RCLCPP_ERROR(execute_solution_node_->get_logger(), "Goal was rejected by server");
 		return error_code;
 	}
 
-	auto result_future = ac->async_get_result(goal_handle);
-	if (rclcpp::spin_until_future_complete(node, result_future) != rclcpp::FutureReturnCode::SUCCESS) {
-		RCLCPP_ERROR(node->get_logger(), "Get result call failed");
-		return error_code;
+	auto result_future = execute_ac_->async_get_result(goal_handle);
+	while (result_future.wait_for(std::chrono::milliseconds(10)) != std::future_status::ready) {
+		if (pimpl()->preempt_requested_) {
+			auto cancel_future = execute_ac_->async_cancel_goal(goal_handle);
+			this->resetPreemptRequest();
+			if (rclcpp::spin_until_future_complete(execute_solution_node_, cancel_future) !=
+			    rclcpp::FutureReturnCode::SUCCESS) {
+				RCLCPP_ERROR(execute_solution_node_->get_logger(), "Could not preempt execution");
+				return error_code;
+			} else {
+				error_code.val = moveit_msgs::msg::MoveItErrorCodes::PREEMPTED;
+				return error_code;
+			}
+		}
+		rclcpp::spin_some(execute_solution_node_);
 	}
 
 	auto result = result_future.get();
 	if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
-		RCLCPP_ERROR(node->get_logger(), "Goal was aborted or canceled");
+		RCLCPP_ERROR(execute_solution_node_->get_logger(), "Goal was aborted or canceled");
 		return error_code;
 	}
 
@@ -345,6 +375,11 @@ const core::RobotModelConstPtr& Task::getRobotModel() const {
 
 void Task::printState(std::ostream& os) const {
 	os << *stages();
+}
+
+bool Task::explainFailure(std::ostream& os) const {
+	os << "Failing stage(s):\n";
+	return stages()->explainFailure(os);
 }
 }  // namespace task_constructor
 }  // namespace moveit

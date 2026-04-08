@@ -1,10 +1,13 @@
 #pragma once
 
-#include <moveit/python/python_tools/ros_types.h>
-#include <moveit/python/python_tools/geometry_msg_types.h>
+#include <pybind11/smart_holder.h>
+#include <py_binding_tools/ros_msg_typecasters.h>
 #include <moveit/task_constructor/properties.h>
 #include <boost/any.hpp>
 #include <typeindex>
+
+PYBIND11_SMART_HOLDER_TYPE_CASTERS(moveit::task_constructor::Property)
+PYBIND11_SMART_HOLDER_TYPE_CASTERS(moveit::task_constructor::PropertyMap)
 
 namespace moveit {
 namespace python {
@@ -32,12 +35,12 @@ private:
 	static boost::any fromPython(const pybind11::object& po) { return pybind11::cast<T>(po); }
 
 	template <class Q = T>
-	typename std::enable_if<ros::message_traits::IsMessage<Q>::value, std::string>::type rosMsgName() {
-		return ros::message_traits::DataType<T>::value();
+	typename std::enable_if<rosidl_generator_traits::is_message<Q>::value, std::string>::type rosMsgName() {
+		return rosidl_generator_traits::name<Q>();
 	}
 
 	template <class Q = T>
-	typename std::enable_if<!ros::message_traits::IsMessage<Q>::value, std::string>::type rosMsgName() {
+	typename std::enable_if<!rosidl_generator_traits::is_message<Q>::value, std::string>::type rosMsgName() {
 		return std::string();
 	}
 };
@@ -61,9 +64,9 @@ public:
 	template <typename PropertyType, typename... Extra>
 	class_& property(const char* name, const Extra&... extra) {
 		PropertyConverter<PropertyType>();  // register corresponding property converter
-		auto getter = [name](const type_& self) {
-			const moveit::task_constructor::PropertyMap& props = self.properties();
-			return props.get<PropertyType>(name);
+		auto getter = [name](type_& self) -> PropertyType& {
+			moveit::task_constructor::PropertyMap& props = self.properties();
+			return const_cast<PropertyType&>(props.get<PropertyType>(name));
 		};
 		auto setter = [name](type_& self, const PropertyType& value) {
 			moveit::task_constructor::PropertyMap& props = self.properties();

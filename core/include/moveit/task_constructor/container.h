@@ -51,6 +51,10 @@ public:
 	PRIVATE_CLASS(ContainerBase)
 	using pointer = std::unique_ptr<ContainerBase>;
 
+	/// Explicitly enable/disable pruning
+	void setPruning(bool pruning) { setProperty("pruning", pruning); }
+	bool pruning() const { return properties().get<bool>("pruning"); }
+
 	size_t numChildren() const;
 	Stage* findChild(const std::string& name) const;
 	Stage* operator[](int index) const;
@@ -76,6 +80,7 @@ public:
 
 	virtual bool canCompute() const = 0;
 	virtual void compute() = 0;
+	bool explainFailure(std::ostream& os) const override;
 
 	/// called by a (direct) child when a new solution becomes available
 	virtual void onNewSolution(const SolutionBase& s) = 0;
@@ -163,7 +168,7 @@ class Fallbacks : public ParallelContainerBase
 	inline void replaceImpl();
 
 public:
-	PRIVATE_CLASS(Fallbacks);
+	PRIVATE_CLASS(Fallbacks)
 	Fallbacks(const std::string& name = "fallbacks");
 
 	void reset() override;

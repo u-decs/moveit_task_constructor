@@ -1,7 +1,8 @@
 #include <moveit/task_constructor/container_p.h>
 #include <moveit/task_constructor/stage_p.h>
 #include <moveit/task_constructor/task_p.h>
-#include <moveit/task_constructor/stages/fixed_state.h>
+#include <moveit/task_constructor/stages/predicate_filter.h>
+#include <moveit/task_constructor/stages/noop.h>
 #include <moveit/planning_scene/planning_scene.h>
 
 #include "stage_mockups.h"
@@ -160,6 +161,26 @@ TEST_F(FallbacksFixturePropagate, activeChildReset) {
 	EXPECT_COSTS(fwd2->solutions(), testing::IsEmpty());
 }
 
+// https://github.com/moveit/moveit_task_constructor/issues/581#issuecomment-2147985474
+TEST_F(FallbacksFixturePropagate, filterPropagatesFailures) {
+	t.add(std::make_unique<GeneratorMockup>(PredefinedCosts::single(0.0)));
+
+	auto fallbacks = std::make_unique<Fallbacks>("Fallbacks");
+	auto add_filtered_fwd = [&fallbacks](double cost, bool accept) {
+		auto fwd = std::make_unique<ForwardMockup>(PredefinedCosts::constant(cost));
+		auto filter = std::make_unique<stages::PredicateFilter>("filter", std::move(fwd));
+		filter->setPredicate([accept](const SolutionBase& /*solution*/, std::string& /*comment*/) { return accept; });
+		fallbacks->add(std::move(filter));
+	};
+	add_filtered_fwd(INF, false);  // Propagate fails, filter rejects
+	add_filtered_fwd(2.0, true);  // Propagate succeeds, filter accepts
+	fallbacks->add(std::make_unique<stages::NoOp>());
+	t.add(std::move(fallbacks));
+
+	EXPECT_TRUE(t.plan());
+	EXPECT_COSTS(t.solutions(), testing::ElementsAre(2.));
+}
+
 using FallbacksFixtureConnect = TaskTestBase;
 
 TEST_F(FallbacksFixtureConnect, connectStageInsideFallbacks) {
@@ -174,18 +195,4 @@ TEST_F(FallbacksFixtureConnect, connectStageInsideFallbacks) {
 
 	EXPECT_TRUE(t.plan());
 	EXPECT_COSTS(t.solutions(), testing::ElementsAre(11, 12, 22, 121));
-}
-
-int main(int argc, char** argv) {
-	for (int i = 1; i < argc; ++i) {
-		if (strcmp(argv[i], "--debug") == 0) {
-			if (rcutils_logging_set_logger_level("moveit_robot_model.robot_model", RCUTILS_LOG_SEVERITY_FATAL) !=
-			    RCUTILS_RET_OK)
-				throw std::runtime_error("Failed to set logger level to RCUTILS_LOG_SEVERITY_ERROR");
-			break;
-		}
-	}
-
-	testing::InitGoogleTest(&argc, argv);
-	return RUN_ALL_TESTS();
 }

@@ -55,7 +55,7 @@ using namespace moveit::task_constructor;
 
 namespace moveit_rviz_plugin {
 
-enum NodeFlag
+enum NodeFlag : uint8_t
 {
 	WAS_VISITED = 0x01,  // indicate that model should emit change notifications
 	NAME_CHANGED = 0x02,  // indicate that name was manually changed
@@ -189,11 +189,8 @@ RemoteTaskModel::RemoteTaskModel(const std::string& service_name, const planning
   : BaseTaskModel(scene, display_context, parent), root_(new Node(nullptr)) {
 	id_to_stage_[0] = root_;  // root node has ID 0
 	// Add random ID to prevent warnings about multiple publishers within the same node
-	rclcpp::NodeOptions options;
-	options.arguments({ "--ros-args", "-r",
-	                    "__node:=get_solution_node_" + std::to_string(reinterpret_cast<std::size_t>(this)), "-r",
-	                    "__ns:=/moveit_task_constructor/remote_task_model" });
-	node_ = rclcpp::Node::make_shared("_", options);
+	node_ = rclcpp::Node::make_shared("get_solution_node_" + std::to_string(reinterpret_cast<std::size_t>(this)),
+	                                  "/moveit_task_constructor/remote_task_model");
 	// service to request solutions
 	get_solution_client_ = node_->create_client<moveit_task_constructor_msgs::srv::GetSolution>(service_name);
 }
@@ -515,7 +512,13 @@ QVariant RemoteSolutionModel::data(const QModelIndex& index, int role) const {
 			return item.id;
 
 		case Qt::ToolTipRole:
+#if 0  // show internal solution id in first column
+			if (index.column() == 0)
+				return item.id;
+#endif
+			// usually just show the comment
 			return item.comment;
+			break;
 
 		case Qt::DisplayRole:
 			switch (index.column()) {

@@ -6,15 +6,12 @@
 #include <list>
 #include <memory>
 
-#include <gtest/gtest.h>
-
-#ifndef TYPED_TEST_SUITE
-#define TYPED_TEST_SUITE(SUITE, TYPES) TYPED_TEST_CASE(SUITE, TYPES)
-#endif
-
 using namespace moveit::task_constructor;
 
-using Pruning = TaskTestBase;
+struct Pruning : TaskTestBase
+{
+	Pruning() : TaskTestBase() { t.setPruning(true); }
+};
 
 TEST_F(Pruning, PropagatorFailure) {
 	auto back = add(t, new BackwardMockup());
@@ -25,6 +22,18 @@ TEST_F(Pruning, PropagatorFailure) {
 	ASSERT_EQ(t.solutions().size(), 0u);
 	// ForwardMockup fails, so the backward stage should never compute
 	EXPECT_EQ(back->runs_, 0u);
+}
+
+// Same as the previous test, except pruning is disabled for the whole task
+TEST_F(Pruning, DisabledPruningPropagatorFailure) {
+	t.setPruning(false);
+	auto back = add(t, new BackwardMockup());
+	add(t, new GeneratorMockup({ 0 }));
+	add(t, new ForwardMockup({ INF }));
+	EXPECT_FALSE(t.plan());
+	ASSERT_EQ(t.solutions().size(), 0u);
+	// ForwardMockup fails, since we have pruning disabled backward should run
+	EXPECT_EQ(back->runs_, 1u);
 }
 
 TEST_F(Pruning, PruningMultiForward) {
@@ -71,23 +80,20 @@ TEST_F(Pruning, ConnectReactivatesPrunedPaths) {
 // same as before, but wrapping Connect into a container
 template <typename T>
 struct PruningContainerTests : public Pruning
-{
-	void test() {
-		add(t, new BackwardMockup);
-		add(t, new GeneratorMockup({ 0 }));
-		auto c = new T();
-		add(*c, new ConnectMockup());
-		add(t, c);
-		add(t, new GeneratorMockup({ 0 }));
+{};
 
-		EXPECT_TRUE(t.plan());
-		EXPECT_EQ(t.solutions().size(), 1u);
-	}
-};
-using ContainerTypes = ::testing::Types<SerialContainer>;  // TODO: fails for Fallbacks!
+using ContainerTypes = ::testing::Types<SerialContainer, Fallbacks>;
 TYPED_TEST_SUITE(PruningContainerTests, ContainerTypes);
 TYPED_TEST(PruningContainerTests, ConnectReactivatesPrunedPaths) {
-	this->test();
+	this->add(this->t, new BackwardMockup);
+	this->add(this->t, new GeneratorMockup({ 0 }));
+	auto c = new TypeParam();
+	this->add(*c, new ConnectMockup());
+	this->add(this->t, c);
+	this->add(this->t, new GeneratorMockup({ 0 }));
+
+	EXPECT_TRUE(this->t.plan());
+	EXPECT_EQ(this->t.solutions().size(), 1u);
 }
 
 TEST_F(Pruning, ConnectConnectForward) {
@@ -100,14 +106,7 @@ TEST_F(Pruning, ConnectConnectForward) {
 	add(t, new GeneratorMockup({ 1, 2, 3 }));
 
 	t.plan();
-
-	ASSERT_EQ(t.solutions().size(), 3u * 2u);
-	std::vector<double> expected_costs = { 11, 12, 13, 21, 22, 23 };
-	auto expected_cost = expected_costs.begin();
-	for (const auto& s : t.solutions()) {
-		EXPECT_EQ(s->cost(), *expected_cost);
-		++expected_cost;
-	}
+	EXPECT_COSTS(t.solutions(), ::testing::ElementsAre(11, 12, 13, 21, 22, 23));
 	EXPECT_EQ(c1->runs_, 3u);
 	EXPECT_EQ(c2->runs_, 6u);  // expect 6 instead of 9 calls
 }
@@ -123,13 +122,7 @@ TEST_F(Pruning, ConnectConnectBackward) {
 
 	t.plan();
 
-	ASSERT_EQ(t.solutions().size(), 3u * 2u);
-	std::vector<double> expected_costs = { 11, 12, 13, 21, 22, 23 };
-	auto expected_cost = expected_costs.begin();
-	for (const auto& s : t.solutions()) {
-		EXPECT_EQ(s->cost(), *expected_cost);
-		++expected_cost;
-	}
+	EXPECT_COSTS(t.solutions(), ::testing::ElementsAre(11, 12, 13, 21, 22, 23));
 	EXPECT_EQ(c1->runs_, 6u);  // expect 6 instead of 9 calls
 	EXPECT_EQ(c2->runs_, 3u);
 }
@@ -147,6 +140,19 @@ TEST_F(Pruning, PropagateIntoContainer) {
 	// the failure in the backward stage (outside the container)
 	// should prune the expected computation of con inside the container
 	EXPECT_EQ(con->runs_, 0u);
+}
+
+TEST_F(Pruning, DISABLED_PropagateIntoContainerAndReactivate) {
+	add(t, new GeneratorMockup({ 0 }));
+
+	auto serial = add(t, new SerialContainer());
+	auto con = add(*serial, new ConnectMockup({ 10, 20 }));
+	add(*serial, new GeneratorMockup({ 0, 1 }));
+
+	add(t, new ForwardMockup({ INF, 0 }));
+
+	EXPECT_TRUE(t.plan());
+	EXPECT_EQ(con->runs_, 1u);
 }
 
 TEST_F(Pruning, PropagateFromContainerPull) {
@@ -206,4 +212,19 @@ TEST_F(Pruning, TwoConnects) {
 	add(t, new ForwardMockup());
 
 	EXPECT_FALSE(t.plan());
+}
+
+TEST_F(Pruning, BackPropagateFailure) {
+	add(t, new GeneratorMockup({ 1.0 }));
+	auto con1 = add(t, new ConnectMockup());
+	add(t, new GeneratorMockup({ 10.0, 20.0 }, 2));  // create all solutions on first run
+	auto con2 = add(t, new ConnectMockup());
+	add(t, new GeneratorMockup({ 100.0, 200.0 }, 2));  // create all solutions on first run
+	// delay failure (INF) until CON2 has found first solution
+	add(t, new DelayingWrapper({ 1 }, std::make_unique<ForwardMockup>(PredefinedCosts({ INF, 2000 }))));
+
+	EXPECT_TRUE(t.plan());
+	EXPECT_COSTS(t.solutions(), ::testing::ElementsAre(2211, 2221));
+	EXPECT_EQ(con1->runs_, 2u);
+	EXPECT_EQ(con2->runs_, 3u);  // 100 - 20 is pruned
 }

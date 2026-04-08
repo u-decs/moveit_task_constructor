@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.16)
 project(rviz_marker_tools)
 
 find_package(ament_cmake REQUIRED)
@@ -10,9 +10,9 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
 	Eigen3
 	geometry_msgs
 	rclcpp
-	rviz2
 	tf2_eigen
 	urdfdom_headers
+	std_msgs
 	visualization_msgs
 )
 

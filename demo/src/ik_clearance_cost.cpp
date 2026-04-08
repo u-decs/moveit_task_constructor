@@ -8,7 +8,7 @@
 #include <moveit/task_constructor/stages/compute_ik.h>
 
 #include <moveit/task_constructor/cost_terms.h>
-#include "ik_clearance_cost_parameters.hpp"
+#include <moveit_task_constructor_demo/ik_clearance_cost_parameters.hpp>
 
 using namespace moveit::task_constructor;
 
@@ -33,7 +33,9 @@ int main(int argc, char** argv) {
 	auto scene = std::make_shared<planning_scene::PlanningScene>(t.getRobotModel());
 	auto& robot_state = scene->getCurrentStateNonConst();
 	robot_state.setToDefaultValues();
-	robot_state.setToDefaultValues(robot_state.getJointModelGroup("panda_arm"), "extended");
+	[[maybe_unused]] bool found =
+	    robot_state.setToDefaultValues(robot_state.getJointModelGroup("panda_arm"), "extended");
+	assert(found);
 
 	moveit_msgs::msg::CollisionObject co;
 	co.id = "obstacle";
@@ -41,7 +43,7 @@ int main(int argc, char** argv) {
 	co.primitives[0].type = shape_msgs::msg::SolidPrimitive::SPHERE;
 	co.primitives[0].dimensions.resize(1);
 	co.primitives[0].dimensions[0] = 0.1;
-	co.header.frame_id = "world";
+	co.header.frame_id = t.getRobotModel()->getModelFrame();
 	co.primitive_poses.emplace_back();
 	co.primitive_poses[0].orientation.w = 1.0;
 	co.primitive_poses[0].position.z = 0.85;
@@ -49,7 +51,7 @@ int main(int argc, char** argv) {
 
 	auto initial = std::make_unique<stages::FixedState>();
 	initial->setState(scene);
-	initial->properties().set("ignore_collisions", true);
+	initial->setIgnoreCollisions(true);
 
 	auto ik = std::make_unique<stages::ComputeIK>();
 	ik->insert(std::move(initial));
@@ -68,7 +70,7 @@ int main(int argc, char** argv) {
 	try {
 		t.plan(0);
 	} catch (const InitStageException& e) {
-		std::cout << e << std::endl;
+		std::cout << e << '\n';
 	}
 
 	// Keep introspection alive

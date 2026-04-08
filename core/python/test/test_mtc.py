@@ -1,16 +1,44 @@
-#! /usr/bin/env python
+#! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from __future__ import print_function
-import unittest, sys
+import sys
+import pytest
+import unittest
+import rclcpp
 from geometry_msgs.msg import Pose, PoseStamped, PointStamped, TwistStamped, Vector3Stamped
 from moveit_msgs.msg import RobotState, Constraints, MotionPlanRequest
 from moveit.task_constructor import core, stages
 
 
+def setUpModule():
+    rclcpp.init()
+
+
+def tearDownModule():
+    rclcpp.shutdown()
+
+
+# When py_binding_tools and MTC are compiled with different pybind11 versions,
+# the corresponding classes are not interoperable.
+def check_pybind11_incompatibility():
+    rclcpp.init()
+    node = rclcpp.Node("dummy")
+    try:
+        core.PipelinePlanner(node)
+    except TypeError:
+        return True
+    finally:
+        rclcpp.shutdown()
+    return False
+
+
+incompatible_pybind11 = check_pybind11_incompatibility()
+incompatible_pybind11_msg = "MoveIt and MTC use incompatible pybind11 versions"
+
+
 class TestPropertyMap(unittest.TestCase):
-    def __init__(self, *args, **kwargs):
-        super(TestPropertyMap, self).__init__(*args, **kwargs)
+
+    def setUp(self):
         self.props = core.PropertyMap()
 
     def _check(self, name, value):
@@ -28,8 +56,10 @@ class TestPropertyMap(unittest.TestCase):
         # MotionPlanRequest is not registered as property type and should raise
         self.assertRaises(TypeError, self._check, "request", MotionPlanRequest())
 
+    @unittest.skipIf(incompatible_pybind11, incompatible_pybind11_msg)
     def test_assign_in_reference(self):
-        planner = core.PipelinePlanner()
+        node = rclcpp.Node("test_mtc_props")
+        planner = core.PipelinePlanner(node)
         props = planner.properties
 
         props["goal_joint_tolerance"] = 3.14
@@ -85,8 +115,7 @@ class TestPropertyMap(unittest.TestCase):
 
 
 class TestModifyPlanningScene(unittest.TestCase):
-    def __init__(self, *args, **kwargs):
-        super(TestModifyPlanningScene, self).__init__(*args, **kwargs)
+    def setUp(self):
         self.mps = stages.ModifyPlanningScene("mps")
 
     def test_attach_objects_invalid_args(self):
@@ -117,9 +146,10 @@ class TestModifyPlanningScene(unittest.TestCase):
 
 
 class TestStages(unittest.TestCase):
-    def __init__(self, *args, **kwargs):
-        super(TestStages, self).__init__(*args, **kwargs)
-        self.planner = core.PipelinePlanner()
+    @unittest.skipIf(incompatible_pybind11, incompatible_pybind11_msg)
+    def setUp(self):
+        self.node = rclcpp.Node("test_mtc_stages")
+        self.planner = core.PipelinePlanner(self.node)
 
     def _check(self, stage, name, value):
         self._check_assign(stage, name, value)
@@ -201,8 +231,7 @@ class TestStages(unittest.TestCase):
         stage.setDirection({"joint": 0.1})
 
     def test_Connect(self):
-        planner = core.PipelinePlanner()
-        stage = stages.Connect("connect", [("group1", planner), ("group2", planner)])
+        stage = stages.Connect("connect", [("group1", self.planner), ("group2", self.planner)])
 
     def test_FixCollisionObjects(self):
         stage = stages.FixCollisionObjects("collision")

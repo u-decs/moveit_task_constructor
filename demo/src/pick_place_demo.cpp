@@ -40,6 +40,7 @@
 // MTC pick/place demo implementation
 #include <moveit_task_constructor_demo/pick_place_task.h>
 
+<<<<<<< HEAD
 #include "pick_place_demo_parameters.hpp"
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_task_constructor_demo_2");

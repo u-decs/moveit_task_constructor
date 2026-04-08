@@ -57,13 +57,7 @@
 #include <moveit/task_constructor/solvers/cartesian_path.h>
 #include <moveit/task_constructor/solvers/pipeline_planner.h>
 #include <moveit_task_constructor_msgs/action/execute_task_solution.hpp>
-#include "pick_place_demo_parameters.hpp"
-
-#if __has_include(<tf2_eigen/tf2_eigen.hpp>)
-#include <tf2_eigen/tf2_eigen.hpp>
-#else
-#include <tf2_eigen/tf2_eigen.h>
-#endif
+#include <moveit_task_constructor_demo/pick_place_demo_parameters.hpp>
 
 #pragma once
 

@@ -1,7 +1,7 @@
 /*********************************************************************
  * Software License Agreement (BSD License)
  *
- *  Copyright (c) 2020, Bielefeld University
+ *  Copyright (c) 2022, PickNik Inc.
  *  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -14,7 +14,7 @@
  *     copyright notice, this list of conditions and the following
  *     disclaimer in the documentation and/or other materials provided
  *     with the distribution.
- *   * Neither the name of Bielefeld University nor the names of its
+ *   * Neither the name of PickNik Inc. nor the names of its
  *     contributors may be used to endorse or promote products derived
  *     from this software without specific prior written permission.
  *
@@ -32,30 +32,14 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  *********************************************************************/
 
-#include <moveit/python/python_tools/ros_types.h>
+/* Authors: Joe Schornak, Sebastian Jahr */
 
-namespace py = pybind11;
+#pragma once
+
+#include <moveit_task_constructor_msgs/msg/trajectory_execution_info.hpp>
+
 namespace moveit {
-namespace python {
-
-py::object createMessage(const std::string& ros_msg_name) {
-	// find delimiting '/' in ros msg name
-	std::size_t pos = ros_msg_name.find('/');
-	// import module
-	py::module m = py::module::import((ros_msg_name.substr(0, pos) + ".msg").c_str());
-	// retrieve type instance
-	py::object cls = m.attr(ros_msg_name.substr(pos + 1).c_str());
-	// create message instance
-	return cls();
-}
-
-bool convertible(const pybind11::handle& h, const char* ros_msg_name) {
-	try {
-		PyObject* o = h.attr("_type").ptr();
-		return py::cast<std::string>(o) == ros_msg_name;
-	} catch (const std::exception& e) {
-		return false;
-	}
-}
-}  // namespace python
+namespace task_constructor {
+using TrajectoryExecutionInfo = moveit_task_constructor_msgs::msg::TrajectoryExecutionInfo;
+}  // namespace task_constructor
 }  // namespace moveit

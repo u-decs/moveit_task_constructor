@@ -205,10 +205,15 @@ bool MoveTo::compute(const InterfaceState& state, planning_scene::PlanningSceneP
 	const auto& path_constraints = props.get<moveit_msgs::msg::Constraints>("path_constraints");
 	robot_trajectory::RobotTrajectoryPtr robot_trajectory;
 	bool success = false;
+	std::string comment = "";
 
 	if (getJointStateGoal(goal, jmg, scene->getCurrentStateNonConst())) {
 		// plan to joint-space target
-		success = planner_->plan(state.scene(), scene, jmg, timeout, robot_trajectory, path_constraints);
+		auto result = planner_->plan(state.scene(), scene, jmg, timeout, robot_trajectory, path_constraints);
+		success = bool(result);
+		if (!success)
+			comment = result.message;
+		solution.setPlannerId(planner_->getPlannerId());
 	} else {  // Cartesian goal
 		// Where to go?
 		Eigen::Isometry3d target;
@@ -217,8 +222,12 @@ bool MoveTo::compute(const InterfaceState& state, planning_scene::PlanningSceneP
 
 		const moveit::core::LinkModel* link;
 		Eigen::Isometry3d ik_pose_world;
-		if (!utils::getRobotTipForFrame(props.property("ik_frame"), *scene, jmg, solution, link, ik_pose_world))
+		std::string error_msg;
+
+		if (!utils::getRobotTipForFrame(props.property("ik_frame"), *scene, jmg, error_msg, link, ik_pose_world)) {
+			solution.markAsFailure(error_msg);
 			return false;
+		}
 
 		if (!getPoseGoal(goal, scene, target) && !getPointGoal(goal, ik_pose_world, scene, target)) {
 			solution.markAsFailure(std::string("invalid goal type: ") + goal.type().name());
@@ -240,7 +249,12 @@ bool MoveTo::compute(const InterfaceState& state, planning_scene::PlanningSceneP
 		Eigen::Isometry3d offset = scene->getCurrentState().getGlobalLinkTransform(link).inverse() * ik_pose_world;
 
 		// plan to Cartesian target
-		success = planner_->plan(state.scene(), *link, offset, target, jmg, timeout, robot_trajectory, path_constraints);
+		const auto result =
+		    planner_->plan(state.scene(), *link, offset, target, jmg, timeout, robot_trajectory, path_constraints);
+		success = bool(result);
+		if (!success)
+			comment = result.message;
+		solution.setPlannerId(planner_->getPlannerId());
 	}
 
 	// store result
@@ -256,7 +270,7 @@ bool MoveTo::compute(const InterfaceState& state, planning_scene::PlanningSceneP
 		solution.setTrajectory(robot_trajectory);
 
 		if (!success)
-			solution.markAsFailure();
+			solution.markAsFailure(comment);
 
 		return true;
 	}

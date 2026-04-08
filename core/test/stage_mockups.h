@@ -8,6 +8,7 @@
 #include "models.h"
 
 #include <gtest/gtest.h>
+#include <gmock/gmock.h>
 
 namespace moveit {
 namespace task_constructor {
@@ -33,6 +34,18 @@ struct PredefinedCosts : CostTerm
 
 constexpr double INF{ std::numeric_limits<double>::infinity() };
 
+/* wrapper stage to delay solutions by a given number of steps */
+struct DelayingWrapper : public WrapperBase
+{
+	std::list<unsigned int> delay_;
+	/* delay list specifies the number of steps each received solution should be delayed */
+	DelayingWrapper(std::list<unsigned int> delay, Stage::pointer&& child)
+	  : WrapperBase("delayer", std::move(child)), delay_{ std::move(delay) } {}
+
+	void compute() override;
+	void onNewSolution(const SolutionBase& s) override { liftSolution(s); }
+};
+
 struct GeneratorMockup : public Generator
 {
 	planning_scene::PlanningScenePtr ps_;
@@ -46,12 +59,13 @@ struct GeneratorMockup : public Generator
 	// default to one solution to avoid infinity loops
 	GeneratorMockup(PredefinedCosts&& costs = PredefinedCosts{ std::list<double>{ 0.0 }, true },
 	                std::size_t solutions_per_compute = 1);
-	GeneratorMockup(std::initializer_list<double> costs)
-	  : GeneratorMockup{ PredefinedCosts{ std::list<double>{ costs }, true } } {}
+	GeneratorMockup(std::initializer_list<double> costs, std::size_t solutions_per_compute = 1)
+	  : GeneratorMockup{ PredefinedCosts{ std::list<double>{ costs }, true }, solutions_per_compute } {}
 
 	void init(const moveit::core::RobotModelConstPtr& robot_model) override;
 	bool canCompute() const override;
 	void compute() override;
+	void reset() override { runs_ = 0; };
 };
 
 struct MonitoringGeneratorMockup : public MonitoringGenerator
@@ -68,6 +82,7 @@ struct MonitoringGeneratorMockup : public MonitoringGenerator
 	bool canCompute() const override { return false; }
 	void compute() override {}
 	void onNewSolution(const SolutionBase& s) override;
+	void reset() override { runs_ = 0; };
 };
 
 struct ConnectMockup : public Connecting
@@ -84,6 +99,7 @@ struct ConnectMockup : public Connecting
 	using Connecting::compatible;  // make this accessible for testing
 
 	void compute(const InterfaceState& from, const InterfaceState& to) override;
+	void reset() override { runs_ = 0; };
 };
 
 struct PropagatorMockup : public PropagatingEitherWay
@@ -100,6 +116,7 @@ struct PropagatorMockup : public PropagatingEitherWay
 
 	void computeForward(const InterfaceState& from) override;
 	void computeBackward(const InterfaceState& to) override;
+	void reset() override { runs_ = 0; };
 };
 
 struct ForwardMockup : public PropagatorMockup
